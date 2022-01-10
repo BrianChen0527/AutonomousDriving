@@ -3,6 +3,7 @@ import tensorflow as tf
 import keras
 import cv2
 import logging
+import math
 
 # filters the frame and draws out edges of lane lines
 def lane_detection(frame):
@@ -110,41 +111,130 @@ def make_points(frame, line):
     x2 = max(-width, min(2 * width, int((y2 - intercept) / slope)))
     return [[x1, y1, x2, y2]]
 
-def display_lines(frame, lines, line_color=(0, 255, 0), line_width=2):
+# Overlay the lane lines with the original frame
+def display_lines(frame, lines, line_color=(0, 255, 0), line_width=14):
     line_image = np.zeros_like(frame)
     if lines is not None:
         for line in lines:
             for x1, y1, x2, y2 in line:
                 cv2.line(line_image, (x1, y1), (x2, y2), line_color, line_width)
-    line_image = cv2.addWeighted(frame, 0.8, line_image, 1, 1)
+    line_image = cv2.addWeighted(line_image, 1, frame, 1, 1)
     return line_image
 
+def find_steering_angle(frame, lines):
+    height, width, _ = frame.shape
+    x_offset = 0
+    y_offset = 0
+
+    if(len(lines) == 2):
+        _, _, left_lane_x2, _ = lines[0][0]
+        _, _, right_lane_x2, _ = lines[1][0]
+        x_offset = int((left_lane_x2 + right_lane_x2)/2 - width/2)
+        y_offset = int(height/2)
+    else:
+        x1, _, x2, _ = lines[0][0]
+        x_offset = int(x2 - x1)
+        y_offset = int(height / 2)
+
+    #compute the steering angle and then convert it from radians to degrees
+    angle_to_mid = int(math.atan(x_offset/y_offset)*180./np.pi)
+    steering_angle = 90 + angle_to_mid
+    return steering_angle
+
+# figure out the heading line from steering angle
+def display_heading_line(frame, steering_angle, line_color=(0, 0, 255), line_width=14):
+    heading_image = np.zeros_like(frame)
+    height, width, _ = frame.shape
+
+    # Steering direction of angles:
+    # 0-89 degree: turn left
+    # 90 degree: going straight
+    # 91-180 degree: turn right
+    steering_angle_radian = steering_angle / 180.0 * math.pi
+    x1 = int(width / 2)
+    y1 = height
+    x2 = int(x1 - height / 2 / math.tan(steering_angle_radian))
+    y2 = int(height / 2)
+
+    cv2.line(heading_image, (x1, y1), (x2, y2), line_color, line_width)
+    heading_image = cv2.addWeighted(frame, 0.8, heading_image, 1, 1)
+
+    return heading_image
+
+
+def stabilize_steering_angle(curr_steering_angle,
+                            new_steering_angle,
+                            num_of_lane_lines,
+                            max_angle_deviation_two_lines=5,
+                            max_angle_deviation_one_lane=15):
+    '''
+    Using last steering angle to stabilize the steering angle
+    if new angle is too different from current angle,
+    only turn by max_angle_deviation degrees
+    '''
+    if num_of_lane_lines == 2:
+        # if both lane lines detected, then we can deviate more
+        max_angle_deviation = max_angle_deviation_two_lines
+    else:
+        # if only one lane detected, we need to turn quicker
+        max_angle_deviation = max_angle_deviation_one_lane
+
+    angle_deviation = new_steering_angle - curr_steering_angle
+    if abs(angle_deviation) > max_angle_deviation:
+        stabilized_steering_angle = int(curr_steering_angle
+                                        + max_angle_deviation * angle_deviation / abs(angle_deviation))
+    else:
+        stabilized_steering_angle = new_steering_angle
+    return stabilized_steering_angle
+
+
+# live video capture display + steering
+def drive():
+    cap = cv2.VideoCapture(0)
+
+    curr_steering_angle = 90
+    while(True):
+        ret, frame = cap.read()
+
+        lanes_frame = lane_detection(frame)
+        cropped_frame = crop_frame(lanes_frame)
+        lines = line_detection(cropped_frame)
+        lane_lines = compute_average_slopes(cropped_frame, lines)
+        lane_lines_frame = display_lines(frame, lane_lines)
+        new_steering_angle = find_steering_angle(lane_lines_frame, lane_lines)
+        steering_frame = display_heading_line(lane_lines_frame, new_steering_angle)
+
+        stabilized_steering_angle = stabilize_steering_angle(curr_steering_angle,
+                                                            new_steering_angle,
+                                                            len(lines))
+        curr_steering_angle = stabilized_steering_angle
+        print("[+] current steering angle: " + str(curr_steering_angle))
+
+        cv2.imshow('frame', steering_frame)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    cap.release()
+
+drive()
+
 
 
 '''
-cap = cv2.VideoCapture(0)
-
-while(True):
-    ret, frame = cap.read()
-
-    frame = lane_detection(frame)
-    frame = crop_frame(frame)
-
-    cv2.imshow('frame', frame)
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
-
-cap.release()
-'''
-
+# test portion that runs on individual images
 frame = cv2.imread("test.JPG")
 lanes_frame = lane_detection(frame)
 cropped_frame = crop_frame(lanes_frame)
 lines = line_detection(cropped_frame)
 lane_lines = compute_average_slopes(cropped_frame, lines)
+print(lane_lines)
 lane_lines_image = display_lines(frame, lane_lines)
-cv2.imwrite("target.jpg", lane_lines_image)
+steering_angle = find_steering_angle(lane_lines_image, lane_lines)
+steering_image = display_heading_line(lane_lines_image, steering_angle)
 
+stabilized_steering_angle = stabilize_steering_angle()
+cv2.imwrite("target.jpg", steering_image)
+'''
 
 
 
